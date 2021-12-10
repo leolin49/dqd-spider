@@ -7,10 +7,12 @@ import random
 import pymysql
 from retrying import retry
 
-DEBUG = True
-ONLY_WATCH = True
+from regex import REGEX_RANK, REGEX_RANK_TEAM, REGEX_TEST
 
-LEAGUE_DICT: Dict[int, str] = {
+DEBUG = True
+ONLY_WATCH = False
+
+LEAGUE_MAP: Dict[int, str] = {
     1: "premier",
     2: "SerieA",
     3: "laliga",
@@ -27,6 +29,7 @@ head = {
 }
 
 f = open("./data.txt", "w", encoding='utf-8')
+
 
 def _result(result):
     return result is None
@@ -65,6 +68,27 @@ class MySQLHelper:
         MySQLHelper.conn_.commit()
 
     @staticmethod
+    def create_rank_table(table_name: str):
+        cursor = MySQLHelper.get_cursor()
+        sql = "CREATE TABLE IF NOT EXISTS {0} (" \
+              "rank_num INT," \
+              "team varchar(50)," \
+              "game_num INT," \
+              "win INT," \
+              "draw INT," \
+              "lose INT," \
+              "win_goal INT," \
+              "lose_goal INT," \
+              "diff_goal INT," \
+              "score INT" \
+              ")".format(table_name)
+        print(sql)
+        ret = cursor.execute(sql)
+        if ret == 0:
+            cursor.execute("TRUNCATE TABLE " + table_name)
+        MySQLHelper.conn_.commit()
+
+    @staticmethod
     def create_team_table(table_name: str):
         cursor = MySQLHelper.get_cursor()
         sql = "CREATE TABLE IF NOT EXISTS {0} (" \
@@ -78,11 +102,11 @@ class MySQLHelper:
               "birth_year INT," \
               "address varchar(50)" \
               ")".format(table_name)
-        # print(sql)
+        print(sql)
         ret = cursor.execute(sql)
         # ret == 0 means table already exists, clear the data before in table
         if ret == 0:
-            cursor.execute("truncate table " + table_name)
+            cursor.execute("TRUNCATE TABLE " + table_name)
         MySQLHelper.conn_.commit()
 
     @staticmethod
@@ -101,9 +125,10 @@ class MySQLHelper:
               "weight INT," \
               "height INT" \
               ")".format(table_name)
+        print(sql)
         ret = cursor.execute(sql)
         if ret == 0:
-            cursor.execute("truncate table " + table_name)
+            cursor.execute("TRUNCATE TABLE " + table_name)
         MySQLHelper.conn_.commit()
 
     @staticmethod
@@ -123,26 +148,29 @@ class MySQLHelper:
             sql = "INSERT INTO " + table_name + " VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
             success_num = cursor.execute(sql, tuple(data_list))
             print("insert data {0} items successfully!".format(success_num))
+        elif table_name.find("rank") != -1:
+            sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
+            success_num = cursor.execute(sql, tuple(data_list))
+            print("insert data {0} items successfully!".format(success_num))
         MySQLHelper.conn_.commit()
         cursor.close()
 
 
 # player or coach class
 class Person:
-    def __init__(self, chinese_name, english_name, club, nation, height, position,
-                 age, weight, number, birthday, dominant_foot, photo_url, person_id):
-        self.chinese_name_ = chinese_name
-        self.english_name_ = english_name
-        self.club_ = club
-        self.nation_ = nation
-        self.height_ = height if height != '' else 0
-        self.position_ = position
-        self.age_ = age if age != '' else 0
-        self.weight_ = weight if weight != '' else 0
-        self.number_ = number if number != '' else 0
-        self.birthday_ = birthday
-        self.dominant_foot_ = dominant_foot
-        self.photo_url_ = photo_url
+    def __init__(self, infos: list, person_id):
+        self.chinese_name_ = infos[0]
+        self.english_name_ = infos[1]
+        self.club_ = infos[2]
+        self.nation_ = infos[3]
+        self.height_ = infos[4] if infos[4] != '' else 0
+        self.position_ = infos[5]
+        self.age_ = infos[6] if infos[6] != '' else 0
+        self.weight_ = infos[7] if infos[7] != '' else 0
+        self.number_ = infos[8] if infos[8] != '' else 0
+        self.birthday_ = infos[9]
+        self.dominant_foot_ = infos[10]
+        self.photo_url_ = infos[11]
         self.person_id_ = person_id
 
     def to_string(self) -> str:
@@ -155,26 +183,25 @@ class Person:
 
 # football club team class
 class Team:
-    def __init__(self, logo_url, chinese_name, english_name, birth_year, country,
-                 city, stadium, max_fans, telephone, email, address, team_id, league_id):
-        self.logo_url_ = logo_url
-        self.chinese_name_ = chinese_name
-        self.english_name_ = english_name
-        self.birth_year_ = birth_year if birth_year != '' else 0
-        self.country_ = country
-        self.city_ = city
-        self.stadium_ = stadium
-        self.max_fans_ = max_fans if max_fans != '' else 0
-        self.telephone_ = telephone
-        self.email_ = email
-        self.address_ = address
+    def __init__(self, infos: list, team_id, league_id) -> None:
+        self.logo_url_ = infos[0]
+        self.chinese_name_ = infos[1]
+        self.english_name_ = infos[2]
+        self.birth_year_ = infos[3] if infos[3] != '' else 0
+        self.country_ = infos[4]
+        self.city_ = infos[5]
+        self.stadium_ = infos[6]
+        self.max_fans_ = infos[7] if infos[7] != '' else 0
+        self.telephone_ = infos[8]
+        self.email_ = infos[9]
+        self.address_ = infos[10]
         self.persons_ = []
         # team id in dqd
         self.id_ = team_id
-        # league id where this team in, look LEAGUE_DICT
+        # league id where this team in, look LEAGUE_MAP
         self.league_id_ = league_id
 
-    def get_team_info(self):
+    def request_player_data(self):
         web_site = "https://www.dongqiudi.com/team/" + self.id_ + ".html"
         response = request_response(web_site)
         html_code = response.text
@@ -209,20 +236,10 @@ class Team:
             person_info_list = re.findall(re_str, person_html_code)
             if len(person_info_list) == 0 or len(person_info_list[0]) < 12:
                 return
-            person_obj = Person(person_info_list[0][0],
-                                person_info_list[0][1],
-                                person_info_list[0][2],
-                                person_info_list[0][3],
-                                person_info_list[0][4],
-                                person_info_list[0][5],
-                                person_info_list[0][6],
-                                person_info_list[0][7],
-                                person_info_list[0][8],
-                                person_info_list[0][9],
-                                person_info_list[0][10],
-                                person_info_list[0][11],
-                                person_id)
-            MySQLHelper.insert_data(LEAGUE_DICT[self.league_id_] + "_player", person_obj.to_list())
+            person_obj = Person(person_info_list[0], person_id)
+
+            MySQLHelper.insert_data(
+                LEAGUE_MAP[self.league_id_] + "_player", person_obj.to_list())
             self.persons_.append(person_obj)
             print(person_obj.to_string())
             f.write(person_obj.to_string() + '\n')
@@ -235,17 +252,37 @@ class Team:
         return [self.id_, self.chinese_name_, self.english_name_, self.country_, self.city_,
                 self.stadium_, self.max_fans_, self.birth_year_, self.address_]
 
+class Rank:
+    def __init__(self, infos: list, rank) -> None:
+        self.rank_num_ = rank
+        self.chinese_name_ = infos[0]
+        self.game_num_ = infos[1] if infos[1] != '' else 0
+        self.win_ = infos[2] if infos[2] != '' else 0
+        self.draw_ = infos[3] if infos[3] != '' else 0
+        self.lose_ = infos[4] if infos[4] != '' else 0
+        self.win_goal_ = infos[5] if infos[5] != '' else 0
+        self.lose_goal_ = infos[6] if infos[6] != '' else 0
+        self.diff_goal_ = infos[7] if infos[7] != '' else 0
+        self.score_ = infos[8] if infos[8] != '' else 0
+
+    def to_string(self) -> str:
+        return "{0}-{1}-{2}".format(self.rank_num_, self.chinese_name_, self.score_)
+
+    def to_list(self) -> list:
+        return [self.rank_num_, self.chinese_name_, self.game_num_, self.win_, self.draw_,
+                self.lose_, self.win_goal_, self.lose_goal_, self.diff_goal_, self.score_]
 
 class League:
-    def __init__(self, league_id: int):
+    def __init__(self, league_id: int) -> None:
         self.id_ = league_id
-        self.team_list_ = []
+        self.teams_ = []
+        self.rank_ = []
 
     def request_team_data(self):
         # create the mysql table if it not exists, if already exists, clear the data before
-        table_name = LEAGUE_DICT[self.id_] + "_team"
+        table_name = LEAGUE_MAP[self.id_] + "_team"
         MySQLHelper.create_team_table(table_name)
-        MySQLHelper.create_player_table(LEAGUE_DICT[self.id_] + "_player")
+        MySQLHelper.create_player_table(LEAGUE_MAP[self.id_] + "_player")
 
         web_site = "https://www.dongqiudi.com/data/" + str(self.id_)
         response = request_response(web_site)
@@ -282,32 +319,49 @@ class League:
                      '</div>'
             team_info_list = re.findall(re_str, team_html_code)
             if len(team_info_list) == 0 or len(team_info_list[0]) < 11:
+                print('team info error: ', team_info_list)
                 return
-            team_obj = Team(team_info_list[0][0],
-                            team_info_list[0][1],
-                            team_info_list[0][2],
-                            team_info_list[0][3][0:4],
-                            team_info_list[0][4],
-                            team_info_list[0][5],
-                            team_info_list[0][6],
-                            team_info_list[0][7],
-                            team_info_list[0][8],
-                            team_info_list[0][9],
-                            team_info_list[0][10],
-                            team_id, self.id_)
+            team_obj = Team(team_info_list[0], team_id, self.id_)
             print(team_obj.to_string())
             MySQLHelper.insert_data(table_name, team_obj.to_list())
             f.write(team_obj.to_string() + '\n')
 
-            team_obj.get_team_info()
-            self.team_list_.append(team_obj)
-            time.sleep(1)
+            team_obj.request_player_data()
+            self.teams_.append(team_obj)
+            time.sleep(0.5)
 
+    def request_rank_data(self):
+        # create the mysql table if it not exists, if already exists, clear the data before
+        table_name = LEAGUE_MAP[self.id_] + "_rank"
+        MySQLHelper.create_rank_table(table_name)
+
+        web_site = "https://www.dongqiudi.com/data/" + str(self.id_)
+        response = request_response(web_site)
+        html_code = response.text
+        rank_html = re.findall(REGEX_RANK, html_code)
+        if len(rank_html) == 0:
+            print('rank info error: html code is empty')
+            return
+        else:
+            rank_html = rank_html[0]
+
+        rank_num = 1
+        while True:
+            rank_re = REGEX_RANK_TEAM.format(rank=rank_num)
+            infos = re.findall(rank_re, rank_html)
+            if len(infos) == 0:
+                break
+            else:
+                rank_obj = Rank(infos[0], rank_num)
+                print(rank_obj.to_string())
+                MySQLHelper.insert_data(table_name, rank_obj.to_list())
+            rank_num += 1
 
 if __name__ == "__main__":
     MySQLHelper.connect()
-    for key, value in LEAGUE_DICT.items():
+    for key, value in LEAGUE_MAP.items():
         league = League(key)
-        league.request_team_data()
+        # league.request_team_data()
+        league.request_rank_data()
     MySQLHelper.conn_.close()
     f.close()
