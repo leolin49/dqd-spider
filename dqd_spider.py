@@ -7,10 +7,11 @@ import random
 import pymysql
 from retrying import retry
 
-from regex import REGEX_RANK, REGEX_RANK_TEAM, REGEX_TEST
+from regex import REGEX_PERSON, REGEX_RANK, REGEX_RANK_TEAM, REGEX_TEAM
 
 DEBUG = True
 ONLY_WATCH = False
+SLEEP_TIME = 0.5    # second
 
 LEAGUE_MAP: Dict[int, str] = {
     1: "premier",
@@ -18,7 +19,7 @@ LEAGUE_MAP: Dict[int, str] = {
     3: "laliga",
     4: "Bundesliga",
     10: "FrenchLigue",
-    231: "ChineseLeague"
+    # 231: "ChineseLeague"
 }
 
 
@@ -28,8 +29,7 @@ head = {
                     Chrome/76.0.3809.132 Safari/537.36'
 }
 
-f = open("./data.txt", "w", encoding='utf-8')
-
+# f = open("./data.txt", "w", encoding='utf-8')
 
 def _result(result):
     return result is None
@@ -54,12 +54,6 @@ class MySQLHelper:
             charset="utf8"
         )
         print("MySQL Server connect successfully!")
-        # cursor = MySQLHelper.get_cursor()
-        # cursor.execute("SHOW TABLES;")
-        # res = cursor.fetchall()
-        # for tables in res:
-        #     cursor.execute("truncate table " + tables[0])
-        #     MySQLHelper.conn_.commit()
 
     @staticmethod
     def create_database():
@@ -139,20 +133,18 @@ class MySQLHelper:
     def insert_data(table_name: str, data_list: list):
         if ONLY_WATCH:
             return
-        cursor = MySQLHelper.get_cursor()
+
         if table_name.find("player") != -1:
-            sql = "INSERT INTO " + table_name + " VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-            success_num = cursor.execute(sql, tuple(data_list))
-            print("insert data {0} items successfully!".format(success_num))
+            sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
         elif table_name.find("team") != -1:
-            sql = "INSERT INTO " + table_name + " VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)"
-            success_num = cursor.execute(sql, tuple(data_list))
-            print("insert data {0} items successfully!".format(success_num))
+            sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
         elif table_name.find("rank") != -1:
             sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
-            success_num = cursor.execute(sql, tuple(data_list))
-            print("insert data {0} items successfully!".format(success_num))
+
+        cursor = MySQLHelper.get_cursor()
+        ret = cursor.execute(sql, tuple(data_list)) 
         MySQLHelper.conn_.commit()
+        print("insert data {0} items successfully!".format(ret))
         cursor.close()
 
 
@@ -209,31 +201,7 @@ class Team:
         for person_id in person_id_list:
             person_url = "https://www.dongqiudi.com/player/" + person_id + ".html"
             person_html_code = request_response(person_url).text
-            re_str = '<div class="player-info" data-v-.*?>' \
-                     '<div class="info-left" data-v-.*?>' \
-                     '<p class="china-name" data-v-.*?>(.*?)<img .*? data-v-.*?></p> ' \
-                     '<p class="en-name" data-v-.*?>(.*?)</p> ' \
-                     '<div class="detail-info" data-v-.*?>' \
-                     '<ul data-v-.*?>' \
-                     '<li data-v-.*?><span data-v-.*?>俱乐部：</span>(.*?)</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>国   籍：</span>(.*?)</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>身   高：</span>(.*?)CM</li>' \
-                     '</ul> ' \
-                     '<ul class="second-ul" data-v-.*?>' \
-                     '<li data-v-.*?><span data-v-.*?>位   置：</span>(.*?)</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>年   龄：</span>(.*?)岁</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>体   重：</span>(.*?)KG</li>' \
-                     '</ul> ' \
-                     '<ul data-v-.*?>' \
-                     '<li data-v-.*?><span data-v-.*?>号   码：</span>(.*?)号</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>生   日：</span>(.*?)</li> ' \
-                     '<li data-v-.*?><span data-v-.*?>惯用脚：</span>(.*?)</li>' \
-                     '</ul>' \
-                     '</div>' \
-                     '</div> ' \
-                     '<img src="(.*?)" alt class="player-photo" data-v-.*?>' \
-                     '</div>'
-            person_info_list = re.findall(re_str, person_html_code)
+            person_info_list = re.findall(REGEX_PERSON, person_html_code)
             if len(person_info_list) == 0 or len(person_info_list[0]) < 12:
                 return
             person_obj = Person(person_info_list[0], person_id)
@@ -242,8 +210,8 @@ class Team:
                 LEAGUE_MAP[self.league_id_] + "_player", person_obj.to_list())
             self.persons_.append(person_obj)
             print(person_obj.to_string())
-            f.write(person_obj.to_string() + '\n')
-            time.sleep(1)
+            # f.write(person_obj.to_string() + '\n')
+            time.sleep(SLEEP_TIME)
 
     def to_string(self) -> str:
         return "{0}-{1}-{2}-{3}".format(self.chinese_name_, self.english_name_, self.city_, self.stadium_)
@@ -288,47 +256,21 @@ class League:
         response = request_response(web_site)
         html_code = response.text
         team_id_list = re.findall('team_id:"(.*?)"', html_code)
-        if DEBUG:
-            print(team_id_list)
         for team_id in team_id_list:
             team_web_site = "https://www.dongqiudi.com/team/" + team_id + ".html"
-            if DEBUG:
-                print(team_web_site)
             team_html_code = request_response(team_web_site).text
-            re_str = '<div class="team-info" data-v-.*?>' \
-                     '<img src="(.*?)" alt class="team-logo" data-v-.*?> ' \
-                     '<div class="info-con" data-v-.*?>' \
-                     '<p class="team-name" data-v-.*?>(.*?)<img src=.*? alt data-v-.*?></p> ' \
-                     '<p class="en-name" data-v-.*?>(.*?)</p> ' \
-                     '<p data-v-.*?>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>成   立：</b>(.*?)</span>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>国   家：</b>(.*?)</span>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>城   市：</b>(.*?)</span>' \
-                     '</p> ' \
-                     '<p data-v-.*?>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>主   场：</b>(.*?)</span>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>容   纳：</b>(.*?)人</span>' \
-                     '</p> ' \
-                     '<p data-v-.*?>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>电   话：</b>(.*?)</span>' \
-                     '<span class="wid\d+" data-v-.*?><b data-v-.*?>邮   箱：</b>(.*?)</span>' \
-                     '</p> ' \
-                     '<p class="address" data-v-.*?><b data-v-.*?>地   址：</b>(.*?)' \
-                     '</p>' \
-                     '</div>' \
-                     '</div>'
-            team_info_list = re.findall(re_str, team_html_code)
+            team_info_list = re.findall(REGEX_TEAM, team_html_code)
             if len(team_info_list) == 0 or len(team_info_list[0]) < 11:
                 print('team info error: ', team_info_list)
                 return
             team_obj = Team(team_info_list[0], team_id, self.id_)
             print(team_obj.to_string())
             MySQLHelper.insert_data(table_name, team_obj.to_list())
-            f.write(team_obj.to_string() + '\n')
+            # f.write(team_obj.to_string() + '\n')
 
             team_obj.request_player_data()
             self.teams_.append(team_obj)
-            time.sleep(0.5)
+            time.sleep(SLEEP_TIME)
 
     def request_rank_data(self):
         # create the mysql table if it not exists, if already exists, clear the data before
@@ -361,7 +303,6 @@ if __name__ == "__main__":
     MySQLHelper.connect()
     for key, value in LEAGUE_MAP.items():
         league = League(key)
-        # league.request_team_data()
+        league.request_team_data()
         league.request_rank_data()
     MySQLHelper.conn_.close()
-    f.close()
