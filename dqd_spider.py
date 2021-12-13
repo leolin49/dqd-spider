@@ -5,12 +5,13 @@ import time
 import re
 import random
 import pymysql
+import threading
 from retrying import retry
 
 from regex import REGEX_PERSON, REGEX_RANK, REGEX_RANK_TEAM, REGEX_TEAM
 
 DEBUG = True
-ONLY_WATCH = False
+ONLY_WATCH = True
 SLEEP_TIME = 0.5    # second
 
 LEAGUE_MAP: Dict[int, str] = {
@@ -306,3 +307,29 @@ if __name__ == "__main__":
         league.request_team_data()
         league.request_rank_data()
     MySQLHelper.conn_.close()
+
+class LeagueThread(threading.Thread):
+    def __init__(self, league: League):
+        super().__init__()
+        self.obj = league
+
+    def run(self) -> None:
+        self.obj.request_team_data()
+        self.obj.request_rank_data()
+
+
+class TeamThread(threading.Thread):
+    def __init__(self, team: Team):
+        super().__init__()
+        self.obj = team
+
+    def run(self) -> None:
+        self.obj.request_player_data()
+
+# if __name__ == "__main__":
+#     MySQLHelper.connect()
+#     for key, value in LEAGUE_MAP.items():
+#         league = League(key)
+#         t = LeagueThread(league)
+#         t.start()
+#     MySQLHelper.conn_.close()
