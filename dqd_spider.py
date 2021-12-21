@@ -6,13 +6,17 @@ import re
 import random
 import pymysql
 import threading
+import logging
 from retrying import retry
+from dbutils.pooled_db import PooledDB
 
 from regex import REGEX_PERSON, REGEX_RANK, REGEX_RANK_TEAM, REGEX_TEAM
+import db_config as cfg
 
 DEBUG = True
-ONLY_WATCH = True
+ONLY_WATCH = False
 SLEEP_TIME = 0.5    # second
+logging.getLogger().setLevel(logging.INFO)
 
 LEAGUE_MAP: Dict[int, str] = {
     1: "premier",
@@ -32,6 +36,7 @@ head = {
 
 # f = open("./data.txt", "w", encoding='utf-8')
 
+
 def _result(result):
     return result is None
 
@@ -43,28 +48,64 @@ def request_response(web_site: str):
 
 
 class MySQLHelper:
-    conn_ = None
+   
+    __pool = None
+
+    def __init__(self) -> None:
+        self._conn = MySQLHelper.__getconn()
+
+    def get_cursor(self):
+        return self._conn.cursor()
 
     @staticmethod
-    def connect():
-        MySQLHelper.conn_ = pymysql.connect(
-            host="localhost",
-            user="root",
-            passwd="123456",
-            db="dqd_data",
-            charset="utf8"
-        )
-        print("MySQL Server connect successfully!")
+    def __getconn():
+        if MySQLHelper.__pool is None:
+            """
+            :param mincached:连接池中空闲连接的初始数量
+            :param maxcached:连接池中空闲连接的最大数量
+            :param maxshared:共享连接的最大数量
+            :param maxconnections:创建连接池的最大数量
+            :param blocking:超过最大连接数量时候的表现，为True等待连接数量下降，为false直接报错处理
+            :param maxusage:单个连接的最大重复使用次数
+            :param setsession:optional list of SQL commands that may serve to prepare
+                the session, e.g. ["set datestyle to ...", "set time zone ..."]
+            :param reset:how connections should be reset when returned to the pool
+                (False or None to rollback transcations started with begin(),
+                True to always issue a rollback for safety's sake)
+            :param host:数据库ip地址
+            :param port:数据库端口
+            :param db:库名
+            :param user:用户名
+            :param passwd:密码
+            :param charset:字符编码
+            """
+            pool = PooledDB(
+                creator=cfg.DB_CREATOR,
+                mincached=cfg.DB_MIN_CACHED,
+                maxcached=cfg.DB_MAX_CACHED,
+                host=cfg.DB_HOST,
+                port=cfg.DB_PORT,
+                user=cfg.DB_USER,
+                passwd=cfg.DB_PASSWORD,
+                db=cfg.DB_DBNAME,
+            )
+            MySQLHelper.__pool = pool
+        return MySQLHelper.__pool.connection()
 
-    @staticmethod
-    def create_database():
-        cursor = MySQLHelper.get_cursor()
-        cursor.execute("CREATE DATABASE IF NOT EXISTS dqd_data")
-        MySQLHelper.conn_.commit()
+    def create_database(self):
+        cursor = self.get_cursor()
+        try:
+            cursor.execute("CREATE DATABASE IF NOT EXISTS dqd_data")
+            self._conn.commit()
+        except Exception as e:
+            self._conn.rollback()
+            logging.error("Mysql Error: ", e)
+        finally:
+            cursor.close()
+            self._conn.close()
 
-    @staticmethod
-    def create_rank_table(table_name: str):
-        cursor = MySQLHelper.get_cursor()
+    def create_rank_table(self, table_name: str):
+        cursor = self.get_cursor()
         sql = "CREATE TABLE IF NOT EXISTS {0} (" \
               "rank_num INT," \
               "team varchar(50)," \
@@ -77,15 +118,14 @@ class MySQLHelper:
               "diff_goal INT," \
               "score INT" \
               ")".format(table_name)
-        print(sql)
+        logging.info(sql)
         ret = cursor.execute(sql)
         if ret == 0:
             cursor.execute("TRUNCATE TABLE " + table_name)
-        MySQLHelper.conn_.commit()
+        self._conn.commit()
 
-    @staticmethod
-    def create_team_table(table_name: str):
-        cursor = MySQLHelper.get_cursor()
+    def create_team_table(self, table_name: str):
+        cursor = self.get_cursor()
         sql = "CREATE TABLE IF NOT EXISTS {0} (" \
               "id INT," \
               "ch_name varchar(50)," \
@@ -97,16 +137,15 @@ class MySQLHelper:
               "birth_year INT," \
               "address varchar(50)" \
               ")".format(table_name)
-        print(sql)
+        logging.info(sql)
         ret = cursor.execute(sql)
-        # ret == 0 means table already exists, clear the data before in table
+        # ret == 0 means table already exists, clear the data which in table before
         if ret == 0:
             cursor.execute("TRUNCATE TABLE " + table_name)
-        MySQLHelper.conn_.commit()
+        self._conn.commit()
 
-    @staticmethod
-    def create_player_table(table_name: str):
-        cursor = MySQLHelper.get_cursor()
+    def create_player_table(self, table_name: str):
+        cursor = self.get_cursor()
         sql = "CREATE TABLE IF NOT EXISTS {0} (" \
               "id INT," \
               "ch_name varchar(25)," \
@@ -120,21 +159,17 @@ class MySQLHelper:
               "weight INT," \
               "height INT" \
               ")".format(table_name)
-        print(sql)
+        logging.info(sql)
         ret = cursor.execute(sql)
         if ret == 0:
             cursor.execute("TRUNCATE TABLE " + table_name)
-        MySQLHelper.conn_.commit()
+        self._conn.commit()
 
-    @staticmethod
-    def get_cursor():
-        return MySQLHelper.conn_.cursor()
-
-    @staticmethod
-    def insert_data(table_name: str, data_list: list):
+    def insert_data(self, table_name: str, data_list: list):
         if ONLY_WATCH:
             return
 
+        sql = ""
         if table_name.find("player") != -1:
             sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
         elif table_name.find("team") != -1:
@@ -142,11 +177,20 @@ class MySQLHelper:
         elif table_name.find("rank") != -1:
             sql = "INSERT INTO {tb} VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)".format(tb=table_name)
 
-        cursor = MySQLHelper.get_cursor()
-        ret = cursor.execute(sql, tuple(data_list)) 
-        MySQLHelper.conn_.commit()
-        print("insert data {0} items successfully!".format(ret))
-        cursor.close()
+        cursor = self.get_cursor()
+        try:
+            ret = cursor.execute(sql, tuple(data_list))
+            self._conn.commit()
+            logging.info("insert data {0} items successfully!".format(ret))
+        except Exception as e:
+            self._conn.rollback()
+            logging.error("Mysql Error: ", e)
+        finally:
+            cursor.close()
+            # self._conn.close()
+
+    def close_conn(self):
+        self._conn.close()
 
 
 # player or coach class
@@ -194,6 +238,8 @@ class Team:
         # league id where this team in, look LEAGUE_MAP
         self.league_id_ = league_id
 
+        self.mysqlclient_ = MySQLHelper()
+
     def request_player_data(self):
         web_site = "https://www.dongqiudi.com/team/" + self.id_ + ".html"
         response = request_response(web_site)
@@ -207,10 +253,9 @@ class Team:
                 return
             person_obj = Person(person_info_list[0], person_id)
 
-            MySQLHelper.insert_data(
-                LEAGUE_MAP[self.league_id_] + "_player", person_obj.to_list())
+            self.mysqlclient_.insert_data(LEAGUE_MAP[self.league_id_] + "_player", person_obj.to_list())
             self.persons_.append(person_obj)
-            print(person_obj.to_string())
+            logging.info(person_obj.to_string())
             # f.write(person_obj.to_string() + '\n')
             time.sleep(SLEEP_TIME)
 
@@ -220,6 +265,7 @@ class Team:
     def to_list(self) -> list:
         return [self.id_, self.chinese_name_, self.english_name_, self.country_, self.city_,
                 self.stadium_, self.max_fans_, self.birth_year_, self.address_]
+
 
 class Rank:
     def __init__(self, infos: list, rank) -> None:
@@ -241,17 +287,19 @@ class Rank:
         return [self.rank_num_, self.chinese_name_, self.game_num_, self.win_, self.draw_,
                 self.lose_, self.win_goal_, self.lose_goal_, self.diff_goal_, self.score_]
 
+
 class League:
     def __init__(self, league_id: int) -> None:
         self.id_ = league_id
         self.teams_ = []
         self.rank_ = []
+        self.mysqlclient_ = MySQLHelper()
 
     def request_team_data(self):
         # create the mysql table if it not exists, if already exists, clear the data before
         table_name = LEAGUE_MAP[self.id_] + "_team"
-        MySQLHelper.create_team_table(table_name)
-        MySQLHelper.create_player_table(LEAGUE_MAP[self.id_] + "_player")
+        self.mysqlclient_.create_team_table(table_name)
+        self.mysqlclient_.create_player_table(LEAGUE_MAP[self.id_] + "_player")
 
         web_site = "https://www.dongqiudi.com/data/" + str(self.id_)
         response = request_response(web_site)
@@ -265,18 +313,19 @@ class League:
                 print('team info error: ', team_info_list)
                 return
             team_obj = Team(team_info_list[0], team_id, self.id_)
-            print(team_obj.to_string())
-            MySQLHelper.insert_data(table_name, team_obj.to_list())
+            logging.info(team_obj.to_string())
+            self.mysqlclient_.insert_data(table_name, team_obj.to_list())
             # f.write(team_obj.to_string() + '\n')
 
             team_obj.request_player_data()
             self.teams_.append(team_obj)
             time.sleep(SLEEP_TIME)
+        # self.mysqlclient_.close_conn()
 
     def request_rank_data(self):
         # create the mysql table if it not exists, if already exists, clear the data before
         table_name = LEAGUE_MAP[self.id_] + "_rank"
-        MySQLHelper.create_rank_table(table_name)
+        self.mysqlclient_.create_rank_table(table_name)
 
         web_site = "https://www.dongqiudi.com/data/" + str(self.id_)
         response = request_response(web_site)
@@ -297,16 +346,9 @@ class League:
             else:
                 rank_obj = Rank(infos[0], rank_num)
                 print(rank_obj.to_string())
-                MySQLHelper.insert_data(table_name, rank_obj.to_list())
+                self.mysqlclient_.insert_data(table_name, rank_obj.to_list())
             rank_num += 1
 
-if __name__ == "__main__":
-    MySQLHelper.connect()
-    for key, value in LEAGUE_MAP.items():
-        league = League(key)
-        league.request_team_data()
-        league.request_rank_data()
-    MySQLHelper.conn_.close()
 
 class LeagueThread(threading.Thread):
     def __init__(self, league: League):
@@ -326,10 +368,17 @@ class TeamThread(threading.Thread):
     def run(self) -> None:
         self.obj.request_player_data()
 
-# if __name__ == "__main__":
-#     MySQLHelper.connect()
-#     for key, value in LEAGUE_MAP.items():
-#         league = League(key)
-#         t = LeagueThread(league)
-#         t.start()
-#     MySQLHelper.conn_.close()
+
+if __name__ == "__main__":
+    start_time = time.time()
+    thread_list = []
+    for key, value in LEAGUE_MAP.items():
+        league = League(key)
+        t = LeagueThread(league)
+        thread_list.append(t)
+    for t in thread_list:
+        t.start()
+    for t in thread_list:
+        t.join()
+    end_time = time.time()
+    print('running time: ', end_time - start_time)
