@@ -1,4 +1,4 @@
-REGEX_TEST =    ''
+REGEX_TEST = ''
 
 REGEX_PERSON = '<div class="player-info" data-v-.*?>' \
                '<div class="info-left" data-v-.*?>' \
